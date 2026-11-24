@@ -1,3 +1,3 @@
 # android
 
-공통평가 02 레포(mobile_webservice_midterm2)의 해당 폴더를 여기로 이관한다 (D5).
+Kotlin · Jetpack Compose 클라이언트 (공통평가 02 PhotoViewer 기반). Android Studio에서 이 폴더를 열어 실행.
