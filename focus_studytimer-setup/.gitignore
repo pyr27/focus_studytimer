@@ -1,0 +1,27 @@
+# python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+# django
+server/db.sqlite3
+server/media/images/
+# edge
+edge/runs/
+edge/faces/
+edge/*.pt
+edge/queue.sqlite3
+# android
+android/.gradle/
+android/build/
+android/app/build/
+android/.idea/
+android/local.properties
+android/.kotlin/
+# os / editors
+.DS_Store
+Thumbs.db
+~$*.docx
+~$*.pptx
