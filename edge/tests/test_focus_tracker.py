@@ -14,7 +14,7 @@ for _name in ('cv2', 'numpy', 'requests'):  # 무거운 의존성이 없으면 �
     except ImportError:
         sys.modules[_name] = types.ModuleType(_name)
 
-from presence import IDLE, PRESENT, FocusTracker  # noqa: E402
+from presence import DISTRACTED, IDLE, PRESENT, FocusTracker  # noqa: E402
 
 
 def run(tracker, start, end, owner, phone=False, fps=10):
@@ -67,6 +67,60 @@ class FocusTrackerSessionTest(unittest.TestCase):
         self.assertEqual([k for k, _ in ev], ['session_start'])
         self.assertEqual(len(self.t.sessions), 1)
         self.assertAlmostEqual(self.t.totals(60)['present_sec'], 60 - 50.2, places=6)
+
+
+class FocusTrackerPhoneTest(unittest.TestCase):
+    def setUp(self):
+        self.t = FocusTracker(absent_sec=30, confirm_frames=3, phone_sec=10, phone_gap_sec=1)
+        run(self.t, 0, 10, True)  # 세션 시작 (0.2s)
+
+    def test_phone_under_phone_sec_is_not_distracted(self):
+        run(self.t, 10, 15, True, phone=True)  # 5초 폰
+        run(self.t, 15, 40, True)
+        self.assertEqual(self.t.state, PRESENT)
+        self.assertEqual(self.t.totals(40)['distracted_sec'], 0)
+
+    def test_phone_over_phone_sec_becomes_distracted_backdated(self):
+        ev = run(self.t, 10, 25, True, phone=True)
+        starts = [info for kind, info in ev if kind == 'distracted_start']
+        self.assertEqual(len(starts), 1)
+        self.assertAlmostEqual(starts[0]['at'], 10.0)  # 확인에 걸린 10초도 딴짓으로 소급
+        self.assertEqual(self.t.state, DISTRACTED)
+
+    def test_return_after_phone_sec_without_phone_and_focus_excludes_distracted(self):
+        run(self.t, 10, 30, True, phone=True)      # 10.0 ~ 29.9 폰
+        ev = run(self.t, 30, 50, True)             # 폰 내려놓음 → 39.9 이후 복귀
+        ends = [info for kind, info in ev if kind == 'distracted_end']
+        self.assertEqual(len(ends), 1)
+        self.assertAlmostEqual(ends[0]['sec'], 19.9, places=6)
+        self.assertEqual(self.t.state, PRESENT)
+        tot = self.t.totals(50)
+        self.assertAlmostEqual(tot['distracted_sec'], 19.9, places=6)
+        self.assertAlmostEqual(tot['focus_sec'], tot['present_sec'] - 19.9, places=6)
+
+    def test_short_gaps_in_phone_detection_stay_continuous(self):
+        for k in range(150):                        # 10~25s, 10프레임마다 1프레임 누락
+            self.t.step(10 + k / 10, True, k % 10 != 9)
+        self.assertEqual(self.t.state, DISTRACTED)
+
+    def test_long_gap_resets_phone_run(self):
+        run(self.t, 10, 16, True, phone=True)
+        run(self.t, 16, 18, True)                   # 2초 끊김 (> gap 1초)
+        run(self.t, 18, 24, True, phone=True)
+        self.assertEqual(self.t.state, PRESENT)
+
+    def test_phone_ignored_while_idle(self):
+        t = FocusTracker(absent_sec=30, confirm_frames=3, phone_sec=10)
+        run(t, 0, 20, False, phone=True)
+        self.assertEqual(t.state, IDLE)
+
+    def test_session_end_while_distracted_closes_interval(self):
+        run(self.t, 10, 25, True, phone=True)       # 딴짓 10.0 ~ 24.9
+        ev = run(self.t, 25, 60, False)             # 얼굴·폰 모두 사라짐
+        s = [info for kind, info in ev if kind == 'session_end'][0]
+        self.assertAlmostEqual(s['present_sec'], 24.9 - 0.2, places=6)
+        self.assertAlmostEqual(s['distracted_sec'], 14.9, places=6)
+        self.assertAlmostEqual(s['focus_sec'], 24.9 - 0.2 - 14.9, places=6)
 
 
 if __name__ == '__main__':

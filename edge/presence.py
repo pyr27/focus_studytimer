@@ -1,4 +1,4 @@
-"""온디바이스 재석 측정 상태머신 (E1).
+"""온디바이스 재석 · 딴짓 측정 상태머신 (E1 + E2).
 
 상태
 - IDLE        : 세션 없음 (등록 사용자 미인식)
@@ -10,10 +10,15 @@
   distracted_sec : 딴짓 구간 합
   focus_sec      : present_sec - distracted_sec  (= 순공시간)
 
+딴짓(E2): 세션 중 YOLO 'cell phone' 이 PHONE_SEC 이상 연속 검출되면 DISTRACTED,
+PHONE_SEC 동안 미검출이면 PRESENT 복귀. 확인에 걸린 시간도 정확히 반영하도록
+딴짓 구간은 '첫 검출 시각 ~ 마지막 검출 시각' 으로 소급 계산한다.
+PHONE_GAP_SEC 이하의 짧은 미검출(YOLO 깜빡임)은 연속으로 본다.
+
 얼굴 식별은 YOLO person 영역에서 Haar 로 얼굴을 찾고 enroll_face.py 로 학습한 LBPH 모델로 판정한다.
 전부 PC 에서 처리하고 서버로는 결과(세션 시작/종료 게시글)만 보낸다.
 
-환경변수: ABSENT_SEC(30) · CONFIRM_FRAMES(3) · FACE_THRESHOLD(60)
+환경변수: ABSENT_SEC(30) · CONFIRM_FRAMES(3) · FACE_THRESHOLD(60) · PHONE_SEC(10) · PHONE_GAP_SEC(1)
 """
 import os
 import pathlib
@@ -65,12 +70,15 @@ class FocusTracker:
     """프레임별 검출 결과(bool)만으로 상태와 시간을 계산한다. cv2 를 쓰지 않아 단위 테스트 가능.
 
     step() 은 그 프레임에 일어난 이벤트 목록을 돌려준다:
-      ('session_start', {'at'}) / ('session_end', summary)
+      ('session_start', {'at'}) / ('distracted_start', {'at'}) / ('distracted_end', {'at', 'sec'})
+      / ('session_end', summary)
     """
 
-    def __init__(self, absent_sec=30.0, confirm_frames=3):
+    def __init__(self, absent_sec=30.0, confirm_frames=3, phone_sec=10.0, phone_gap_sec=1.0):
         self.absent_sec = absent_sec
         self.confirm_frames = confirm_frames
+        self.phone_sec = phone_sec
+        self.phone_gap_sec = phone_gap_sec
         self.state = IDLE
         self.since = None          # 현재 상태가 시작된 시각
         self.streak = 0            # 등록 사용자 연속 인식 프레임 수
@@ -82,6 +90,14 @@ class FocusTracker:
         self.started_at = now
         self.distracted = []       # 닫힌 딴짓 구간 [(start, end), ...]
         self.d_start = None        # 진행 중인 딴짓 구간 시작
+        self.phone_since = None    # 휴대폰 연속 검출 시작 시각
+        self.phone_last = None     # 휴대폰 마지막 검출 시각
+
+    def phone_run(self, now):
+        """진행 중인 휴대폰 연속 검출 길이(초). 끊겼으면 0."""
+        if self.phone_last is None or now - self.phone_last > self.phone_gap_sec:
+            return 0.0
+        return self.phone_last - self.phone_since
 
     # ------------------------------------------------------------------
     def step(self, now, owner_raw, phone_raw=False):
@@ -102,11 +118,28 @@ class FocusTracker:
 
         if now - self.last_seen > self.absent_sec:  # ABSENT_SEC 이상 미인식 → 세션 종료
             events.append(('session_end', self._end_session(self.last_seen)))
+            return events
+
+        # 휴대폰 연속 검출 추적 (세션 중에만)
+        if phone_raw:
+            if self.phone_last is None or now - self.phone_last > self.phone_gap_sec:
+                self.phone_since = now  # 끊긴 뒤 새로 시작
+            self.phone_last = now
+
+        if self.state == PRESENT and self.phone_run(now) >= self.phone_sec:
+            self.state, self.since = DISTRACTED, now
+            self.d_start = self.phone_since  # 첫 검출 시각으로 소급
+            events.append(('distracted_start', {'at': self.d_start}))
+        elif self.state == DISTRACTED and now - self.phone_last >= self.phone_sec:
+            self.distracted.append((self.d_start, self.phone_last))  # 마지막 검출 시각까지만 딴짓
+            events.append(('distracted_end', {'at': self.phone_last, 'sec': self.phone_last - self.d_start}))
+            self.d_start = None
+            self.state, self.since = PRESENT, now
         return events
 
     def _end_session(self, end):
         if self.d_start is not None:
-            self.distracted.append((self.d_start, end))
+            self.distracted.append((self.d_start, min(self.phone_last, end)))
             self.d_start = None
         summary = self._summary(end)
         self.sessions.append(summary)
@@ -141,11 +174,14 @@ class PresenceDetection:
     ABSENT_SEC = env_float('ABSENT_SEC', 30)               # 이 시간 이상 안 보이면 세션 종료
     THRESHOLD = env_float('FACE_THRESHOLD', 60)            # LBPH 거리: 작을수록 유사. 본인≈40, 타인≈75~ 사이에 선을 긋는다
     CONFIRM_FRAMES = int(os.environ.get('CONFIRM_FRAMES', 3))  # 연속 N프레임 인식돼야 '재석' 확정
+    PHONE_SEC = env_float('PHONE_SEC', 10)                 # 휴대폰 연속 검출/미검출 이 시간 이상 → 딴짓 시작/종료
+    PHONE_GAP_SEC = env_float('PHONE_GAP_SEC', 1)          # 이 시간 이하 미검출은 '연속'으로 본다 (YOLO 깜빡임)
+    PHONE_CLASS = 'cell phone'
 
     def __init__(self, token=None):
         self.enabled = False
         self.others = 0               # 이번 프레임에서 등록 사용자가 아닌 사람 수 (침입자 판정에 사용)
-        self.last = {'ts': time.time(), 'owner_seen': False, 'person_count': 0, 'state': IDLE}
+        self.last = {'ts': time.time(), 'owner_seen': False, 'phone_seen': False, 'person_count': 0, 'state': IDLE}
         model = os.path.join('faces', f'{self.username}.yml')
         if not (hasattr(cv2, 'face') and os.path.exists(model)):
             print(f'[Presence] disabled: {model} 없음 (python enroll_face.py --name {self.username})')
@@ -155,10 +191,11 @@ class PresenceDetection:
         self.detector = cv2.CascadeClassifier(CASCADE)
         self.token = token or self._login()
         self.font = self._load_font()
-        self.tracker = FocusTracker(self.ABSENT_SEC, self.CONFIRM_FRAMES)
+        self.tracker = FocusTracker(self.ABSENT_SEC, self.CONFIRM_FRAMES, self.PHONE_SEC, self.PHONE_GAP_SEC)
         self.enabled = True
         print(f'[Presence] enabled for {self.username} '
-              f'(ABSENT_SEC={self.ABSENT_SEC:g}, CONFIRM_FRAMES={self.CONFIRM_FRAMES}, FACE_THRESHOLD={self.THRESHOLD:g})')
+              f'(ABSENT_SEC={self.ABSENT_SEC:g}, CONFIRM_FRAMES={self.CONFIRM_FRAMES}, FACE_THRESHOLD={self.THRESHOLD:g}, '
+              f'PHONE_SEC={self.PHONE_SEC:g}, PHONE_GAP_SEC={self.PHONE_GAP_SEC:g})')
 
     def _login(self):
         res = requests.post(self.HOST + '/api-token-auth/', {'username': self.username, 'password': self.password})
@@ -206,12 +243,14 @@ class PresenceDetection:
     def update(self, frame, det, names, save_dir):
         """매 프레임 호출: 상태 갱신 + 오버레이. 세션 시작/종료 시 서버에 게시. 프레임 정보는 self.last 에 남긴다."""
         now = time.time()
-        person_count = sum(1 for *_, cls in det if names[int(cls)] == 'person')
-        self.last = {'ts': now, 'owner_seen': False, 'person_count': person_count, 'state': IDLE}
+        classes = [names[int(cls)] for *_, cls in det]
+        phone_raw = self.PHONE_CLASS in classes
+        self.last = {'ts': now, 'owner_seen': False, 'phone_seen': phone_raw,
+                     'person_count': classes.count('person'), 'state': IDLE}
         if not self.enabled:
             return
         owner_raw = self.is_owner(frame, det, names)
-        for kind, info in self.tracker.step(now, owner_raw):
+        for kind, info in self.tracker.step(now, owner_raw, phone_raw):
             self.on_event(kind, info, frame, save_dir)
         self.last.update(owner_seen=owner_raw, state=self.tracker.state)
         self.draw(frame, self.overlay(now))
@@ -219,6 +258,10 @@ class PresenceDetection:
     def on_event(self, kind, info, frame, save_dir):
         if kind == 'session_start':
             self.post('재석 시작', f'{self.username} 인식됨 - 세션 시작', frame, save_dir)
+        elif kind == 'distracted_start':
+            print(f'[Presence] 딴짓 시작 (휴대폰 {self.PHONE_SEC:g}s 이상 검출, {datetime.fromtimestamp(info["at"]):%H:%M:%S} 부터)')
+        elif kind == 'distracted_end':
+            print(f'[Presence] 딴짓 종료: {fmt(info["sec"])} 순공에서 차감')
         elif kind == 'session_end':
             s = info
             text = (f'{self.username} 세션 종료 - 순공 {fmt(s["focus_sec"])} · 딴짓 {fmt(s["distracted_sec"])} · '
@@ -244,6 +287,9 @@ class PresenceDetection:
             away_for = now - tr.last_seen
             if away_for > 2:
                 text += f'  (미인식 {int(away_for)}s)'
+            run = tr.phone_run(now)
+            if tr.state == PRESENT and run > 0:
+                text += f'  (폰 감지 {int(run)}/{tr.phone_sec:g}s)'
             lines = [(text, color)]
             if tr.state == DISTRACTED or t['distracted_sec'] > 0:
                 lines.append((f'딴짓 {fmt(t["distracted_sec"])}', ORANGE))

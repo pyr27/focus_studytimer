@@ -176,6 +176,10 @@ def run(
     cd = ChangeDetection(names)  # added
     pd = PresenceDetection(cd.token)  # added (편의 기능 ①: 등록 사용자 얼굴 식별 → 재석/자리 비움)
     person_cls = next(i for i, n in (names.items() if isinstance(names, dict) else enumerate(names)) if n == 'person')  # added
+    phone_cls = next((i for i, n in (names.items() if isinstance(names, dict) else enumerate(names))
+                      if n == PresenceDetection.PHONE_CLASS), None)  # added (E2: 휴대폰 딴짓 감지)
+    if phone_cls is None or (classes is not None and phone_cls not in classes):  # added (E2)
+        LOGGER.warning(f"'{PresenceDetection.PHONE_CLASS}' 를 검출하지 않음 (모델 클래스 또는 --classes 확인) → 딴짓 감지 비활성")
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
     # Dataloader
