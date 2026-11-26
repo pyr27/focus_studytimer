@@ -67,6 +67,7 @@ from utils.general import (
 from utils.torch_utils import select_device, smart_inference_mode
 from changedetection import ChangeDetection  # added
 from presence import PresenceDetection  # added (편의 기능 ①)
+from frame_logger import FrameLogger  # added (V1: LOG_FRAMES=1 이면 프레임 로그 CSV)
 
 
 @smart_inference_mode()
@@ -176,6 +177,11 @@ def run(
     cd = ChangeDetection(names)  # added
     pd = PresenceDetection(cd.token)  # added (편의 기능 ①: 등록 사용자 얼굴 식별 → 재석/자리 비움)
     person_cls = next(i for i, n in (names.items() if isinstance(names, dict) else enumerate(names)) if n == 'person')  # added
+    phone_cls = next((i for i, n in (names.items() if isinstance(names, dict) else enumerate(names))
+                      if n == PresenceDetection.PHONE_CLASS), None)  # added (E2: 휴대폰 딴짓 감지)
+    if phone_cls is None or (classes is not None and phone_cls not in classes):  # added (E2)
+        LOGGER.warning(f"'{PresenceDetection.PHONE_CLASS}' 를 검출하지 않음 (모델 클래스 또는 --classes 확인) → 딴짓 감지 비활성")
+    fl = FrameLogger()  # added (V1)
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
     # Dataloader
@@ -290,6 +296,7 @@ def run(
             # Stream results
             im0 = annotator.result()
             pd.update(im0, det, names, save_dir)  # added (편의 기능 ①: 등록 사용자 재석/자리 비움)
+            fl.log(pd.last)  # added (V1: ts, owner_seen, phone_seen, person_count, state)
             if pd.owner_only():  # added (편의 기능 ①: 등록 사용자는 침입자가 아님 → 미등록 인원만 침입 게시)
                 detected[person_cls] = 0
             cd.add(names, detected, save_dir, im0)  # added
@@ -322,6 +329,8 @@ def run(
 
         # Print time (inference-only)
         LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1e3:.1f}ms")
+
+    fl.close()  # added (V1)
 
     # Print results
     t = tuple(x.t / seen * 1e3 for x in dt)  # speeds per image

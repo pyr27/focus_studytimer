@@ -256,3 +256,6 @@ venv/
 runs/
 *.pt
 faces/
+
+# Focus: 검증용 CSV 로그 (frame_logger.py / gt_logger.py)
+logs/
