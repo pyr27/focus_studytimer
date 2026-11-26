@@ -44,9 +44,9 @@ jobs:
         working-directory: edge
         run: |
           pip install ruff
-          ruff check presence.py changedetection.py enroll_face.py frame_logger.py --select E9,F63,F7,F82
-          python -m py_compile presence.py changedetection.py enroll_face.py frame_logger.py detect.py
-          python -m unittest tests/test_focus_tracker.py tests/test_frame_logger.py -v
+          ruff check presence.py changedetection.py enroll_face.py frame_logger.py gt_logger.py --select E9,F63,F7,F82
+          python -m py_compile presence.py changedetection.py enroll_face.py frame_logger.py gt_logger.py detect.py
+          python -m unittest tests/test_focus_tracker.py tests/test_frame_logger.py tests/test_gt_logger.py -v
 
   android:
     name: android · assembleDebug
